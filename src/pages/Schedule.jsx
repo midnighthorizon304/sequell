@@ -113,13 +113,15 @@ export default function Schedule() {
   const [mode, setMode] = useState(defaultMode)
 
   const { prefs, setPref } = usePreferences({
-    fasting_enabled:  true,
-    eat_window_start: '11:30',
-    eat_window_end:   '19:30',
-    wake_time:        localStorage.getItem('sequell_wake') || '07:00',
+    fasting_enabled:    true,
+    eat_window_start:   '11:30',
+    eat_window_end:     '19:30',
+    wake_time_weekday:  localStorage.getItem('sequell_wake') || '07:00',
+    wake_time_weekend:  localStorage.getItem('sequell_wake') || '08:00',
   })
 
-  const { fasting_enabled, eat_window_start, eat_window_end, wake_time: wakeTime } = prefs
+  const { fasting_enabled, eat_window_start, eat_window_end, wake_time_weekday, wake_time_weekend } = prefs
+  const wakeTime = mode === 'weekday' ? wake_time_weekday : wake_time_weekend
   const showFastingWindow = mode === 'weekday' && fasting_enabled
 
   const schedule = mode === 'weekday'
@@ -141,22 +143,32 @@ export default function Schedule() {
       {/* Controls card */}
       <div className="card" style={{ marginBottom: 12 }}>
 
-        {/* Row 1: protocol + wake time */}
-        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
+        {/* Row 1: protocol toggle */}
+        <div>
+          <label style={{ marginBottom: 5 }}>Protocol</label>
+          <div className="toggle-group">
+            <button className={`toggle-btn ${mode === 'weekday' ? 'active' : ''}`} onClick={() => setMode('weekday')}>
+              <Sun size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />Weekday
+            </button>
+            <button className={`toggle-btn ${mode === 'weekend' ? 'active' : ''}`} onClick={() => setMode('weekend')}>
+              <Moon size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />Weekend
+            </button>
+          </div>
+        </div>
+
+        {/* Row 2: wake times */}
+        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
           <div style={{ flex: 1 }}>
-            <label style={{ marginBottom: 5 }}>Protocol</label>
-            <div className="toggle-group">
-              <button className={`toggle-btn ${mode === 'weekday' ? 'active' : ''}`} onClick={() => setMode('weekday')}>
-                <Sun size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />Weekday
-              </button>
-              <button className={`toggle-btn ${mode === 'weekend' ? 'active' : ''}`} onClick={() => setMode('weekend')}>
-                <Moon size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />Weekend
-              </button>
-            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Sun size={11} color="var(--text-muted)" /> Weekday wake
+            </label>
+            <input type="time" value={wake_time_weekday} onChange={e => setPref('wake_time_weekday', e.target.value)} />
           </div>
           <div style={{ flex: 1 }}>
-            <label>Wake time</label>
-            <input type="time" value={wakeTime} onChange={e => setPref('wake_time', e.target.value)} />
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Moon size={11} color="var(--text-muted)" /> Weekend wake
+            </label>
+            <input type="time" value={wake_time_weekend} onChange={e => setPref('wake_time_weekend', e.target.value)} />
           </div>
         </div>
 

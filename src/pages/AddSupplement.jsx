@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { Bot, Save, Plus, Trash2, AlertCircle, CheckCircle, ChevronRight, ArrowLeft, X } from 'lucide-react'
 import { useSupplements } from '../context/SupplementContext'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -86,10 +86,11 @@ const PARSE_PROMPT = `You are a supplement label data extractor. Given a specifi
 
 For probiotic nutrients, populate strains as an array: [{"name": "Lactobacillus acidophilus", "cfu": "2.5 billion"}]. For all others set strains to null.
 
-Rules for dv_percent:
-- If you recognize the exact product, use the % DV printed on that product's label. Set dv_source to "label".
-- If unknown exact product, calculate from current FDA RDI values. Set dv_source to "fda_rdi".
-- Set dv_percent and dv_source to null if no DV is established (omega-3, probiotics CFU, etc.).
+CRITICAL rules for dv_percent:
+- dv_percent MUST be the exact integer printed in the "% Daily Value" column on the product label. Never calculate — read the label value directly from your product knowledge.
+- Set dv_source to "label" when you know the exact label value.
+- Only fall back to calculation (dv_source: "fda_rdi") when you cannot confirm the exact label value. Use CURRENT 2020 FDA Daily Values: Vitamin C 90mg, Vitamin D 20mcg, Calcium 1300mg, Iron 18mg, Vitamin E 15mg, B1 1.2mg, B2 1.3mg, Niacin 16mg, B6 1.7mg, Folate 400mcg DFE, B12 2.4mcg, Biotin 30mcg, Pantothenic Acid 5mg, Phosphorus 1250mg, Iodine 150mcg, Magnesium 420mg, Zinc 11mg, Selenium 55mcg, Copper 0.9mg, Manganese 2.3mg, Potassium 4700mg.
+- Set dv_percent and dv_source to null if no DV is established (omega-3s, probiotics CFU, etc.).
 - Never invent or estimate a value you are not confident in.
 - Include ALL nutrients listed in the Supplement Facts panel.
 Return ONLY valid JSON. No markdown fences.`
@@ -138,6 +139,10 @@ function shapeForm(json) {
 
 // step: 'idle' | 'detecting' | 'selecting' | 'parsing' | 'parsed'
 export default function AddSupplement() {
+  const { id: editId }  = useParams()
+  const isEdit          = !!editId
+  const [editLoaded, setEditLoaded] = useState(false)
+
   const [query, setQuery]       = useState('')
   const [step, setStep]         = useState('idle')
   const [variants, setVariants] = useState([])
@@ -147,8 +152,38 @@ export default function AddSupplement() {
   const [saved, setSaved]       = useState(false)
   const [newIngredient, setNewIngredient] = useState('')
 
-  const { addSupplement } = useSupplements()
+  const { addSupplement, updateSupplement, supplements } = useSupplements()
   const navigate = useNavigate()
+
+  // Pre-fill form when editing an existing supplement
+  useEffect(() => {
+    if (!isEdit || editLoaded) return
+    const existing = supplements.find(s => s.id === editId)
+    if (!existing) return
+    setForm({
+      name:              existing.name || '',
+      brand:             existing.brand || '',
+      category:          existing.category || 'Vitamins',
+      dose_per_serving:  existing.dose_per_serving || '1 cap',
+      servings_per_day:  existing.servings_per_day || 1,
+      dose_multiplier:   existing.dose_multiplier || 1,
+      timing:            existing.timing || [],
+      timing_notes:      existing.timing_notes || '',
+      suggested_use:     existing.suggested_use || '',
+      cautions:          existing.cautions || '',
+      other_ingredients: existing.other_ingredients || [],
+      nutrients: (existing.nutrients || []).map(n => ({
+        name:       n.name || '',
+        full_name:  n.full_name || null,
+        amount:     n.amount ?? 0,
+        unit:       n.unit || '',
+        dv_percent: n.dv_percent ?? null,
+        dv_source:  n.dv_source ?? null,
+        strains:    n.strains || null,
+      })),
+    })
+    setEditLoaded(true)
+  }, [editId, isEdit, supplements, editLoaded])
 
   // ── AI flow ───────────────────────────────────────────────────────────────
 
@@ -207,7 +242,11 @@ export default function AddSupplement() {
   async function handleSave() {
     if (!form.name.trim()) return
     setSaving(true)
-    await addSupplement(form)
+    if (isEdit) {
+      await updateSupplement(editId, form)
+    } else {
+      await addSupplement(form)
+    }
     setSaving(false); setSaved(true)
     setTimeout(() => navigate('/stack'), 1200)
   }
@@ -261,12 +300,12 @@ export default function AddSupplement() {
   return (
     <div className="page">
       <div className="page-header">
-        <div className="page-title">Add Supplement</div>
-        <div className="page-subtitle">Type a name and let AI fill in the details</div>
+        <div className="page-title">{isEdit ? 'Edit Supplement' : 'Add Supplement'}</div>
+        <div className="page-subtitle">{isEdit ? 'Update the details below' : 'Type a name and let AI fill in the details'}</div>
       </div>
 
-      {/* ── AI Autofill ── */}
-      <div className="card">
+      {/* ── AI Autofill (add mode only) ── */}
+      {!isEdit && <div className="card">
         <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <Bot size={13} /> AI Autofill
         </div>
@@ -350,7 +389,7 @@ export default function AddSupplement() {
             {error}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* ── Supplement Details ── */}
       <div className="card">
@@ -543,6 +582,8 @@ export default function AddSupplement() {
           ? <><CheckCircle size={16} /> Saved!</>
           : saving
           ? <><div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Saving…</>
+          : isEdit
+          ? <><Save size={16} /> Save Changes</>
           : <><Save size={16} /> Save to Stack</>
         }
       </button>

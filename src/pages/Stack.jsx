@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Trash2, ChevronDown, ChevronUp, Pill, AlertCircle, BookOpen, Info } from 'lucide-react'
+import { Trash2, Pencil, ChevronDown, ChevronUp, Pill, AlertCircle, BookOpen } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { useSupplements } from '../context/SupplementContext'
 import { TIMING_LABELS, CATEGORY_COLORS } from '../lib/defaultData'
 import ConfirmModal from '../components/ConfirmModal'
@@ -19,6 +20,7 @@ function categoryBadgeStyle(category) {
 
 function SupplementCard({ supp, onDeleteRequest }) {
   const [expanded, setExpanded] = useState(false)
+  const navigate = useNavigate()
 
   const mult        = supp.dose_multiplier || 1
   const hasNutrients = supp.nutrients?.length > 0
@@ -35,14 +37,22 @@ function SupplementCard({ supp, onDeleteRequest }) {
             <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a', lineHeight: 1.3 }}>{supp.name}</div>
             <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>{supp.brand}</div>
           </div>
-          <button
-            className="btn btn-icon btn-ghost btn-sm"
-            onClick={() => onDeleteRequest(supp.id, supp.name)}
-            title="Remove"
-            style={{ flexShrink: 0 }}
-          >
-            <Trash2 size={14} color="#94a3b8" />
-          </button>
+          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+            <button
+              className="btn btn-icon btn-ghost btn-sm"
+              onClick={() => navigate(`/edit/${supp.id}`)}
+              title="Edit"
+            >
+              <Pencil size={14} color="#94a3b8" />
+            </button>
+            <button
+              className="btn btn-icon btn-ghost btn-sm"
+              onClick={() => onDeleteRequest(supp.id, supp.name)}
+              title="Remove"
+            >
+              <Trash2 size={14} color="#94a3b8" />
+            </button>
+          </div>
         </div>
 
         {/* Badges */}

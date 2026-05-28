@@ -86,6 +86,16 @@ export function SupplementProvider({ children }) {
     }
   }
 
+  async function updateSupplement(id, data) {
+    setSupplements(prev => prev.map(s => s.id === id ? normalizeSupp({ ...s, ...data }) : s))
+    try {
+      const { error: err } = await supabase.from('supplements').update(data).eq('id', id)
+      if (err) throw err
+    } catch (err) {
+      console.warn('Update failed:', err.message)
+    }
+  }
+
   async function deleteSupplement(id) {
     setSupplements(prev => prev.filter(s => s.id !== id))
     try {
@@ -112,6 +122,7 @@ export function SupplementProvider({ children }) {
       loading,
       error,
       addSupplement,
+      updateSupplement,
       deleteSupplement,
       reload: loadSupplements,
       aggregateNutrients,
