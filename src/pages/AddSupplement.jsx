@@ -1,0 +1,556 @@
+import { useState } from 'react'
+import Anthropic from '@anthropic-ai/sdk'
+import { Bot, Save, Plus, Trash2, AlertCircle, CheckCircle, ChevronRight, ArrowLeft, X } from 'lucide-react'
+import { useSupplements } from '../context/SupplementContext'
+import { useNavigate } from 'react-router-dom'
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const CATEGORIES = [
+  'Vitamins', 'Minerals', 'Omega Fatty Acids', 'Probiotics',
+  'Multivitamin', 'Prescription', 'Herbal', 'Amino Acids', 'Other',
+]
+
+const TIMING_OPTIONS = [
+  { value: 'wake',          label: 'On Waking' },
+  { value: 'wake_30',       label: 'Wake + 30min' },
+  { value: 'first_meal',    label: 'First Meal' },
+  { value: 'between_meals', label: 'Between Meals' },
+  { value: 'evening',       label: 'Evening' },
+  { value: 'bedtime',       label: 'Bedtime' },
+]
+
+const EMPTY_FORM = {
+  name: '', brand: '', category: 'Vitamins',
+  dose_per_serving: '1 cap', servings_per_day: 1,
+  dose_multiplier: 1,
+  timing: [], timing_notes: '',
+  suggested_use: '', cautions: '',
+  other_ingredients: [],
+  nutrients: [],
+}
+
+// ── Prompts ──────────────────────────────────────────────────────────────────
+
+const VARIANT_PROMPT = `You are a supplement variant detector. Given a supplement query, decide if it is specific enough to identify a single product, or if it matches multiple meaningfully different versions.
+
+A query IS specific enough if it clearly states a dose amount AND form (e.g. "Vitamin D3 2000 IU softgel"), OR names a precise SKU.
+
+A query is AMBIGUOUS if a common product comes in multiple dose strengths, delivery forms with different nutrient profiles, or importantly different formulations (chewable vs. swallowable changes sugar content; time-release vs. standard changes absorption).
+
+Do NOT list variants for minor differences like packaging count. Only list variants where the choice affects what nutrients or doses end up in the body.
+
+Return JSON — one of two shapes:
+
+If specific:
+{ "specific": true }
+
+If ambiguous:
+{
+  "specific": false,
+  "variants": [
+    {
+      "label": "Brand + key differentiator",
+      "descriptor": "Short spec line (e.g. 1000 IU · softgel · standard dose)",
+      "query": "Exact descriptive string to pass to the label parser"
+    }
+  ]
+}
+
+Return 2–4 variants maximum. Return ONLY valid JSON. No markdown fences.`
+
+const PARSE_PROMPT = `You are a supplement label data extractor. Given a specific supplement name, return a JSON object with exactly these fields:
+{
+  "name": "Full product name",
+  "brand": "Brand name or empty string",
+  "category": "One of: Vitamins, Minerals, Omega Fatty Acids, Probiotics, Multivitamin, Prescription, Herbal, Amino Acids, Other",
+  "dose_per_serving": "e.g. '1 cap', '2 softgels', '1 tablet'",
+  "servings_per_day": 1,
+  "timing": ["array using only: wake, wake_30, first_meal, between_meals, evening, bedtime"],
+  "timing_notes": "Specific timing instructions",
+  "suggested_use": "Verbatim suggested use text from the label, or empty string if unknown",
+  "cautions": "Any caution, warning, or advisory text from the label (e.g. blood clotting warnings, pregnancy warnings). Empty string if none.",
+  "other_ingredients": ["Inactive ingredients exactly as on the label, e.g. 'Hypromellose (capsule)', 'Microcrystalline Cellulose', 'Silicon Dioxide'"],
+  "nutrients": [
+    {
+      "name": "Short base nutrient name for tracking (e.g. 'Iron', 'Vitamin D3', 'Magnesium')",
+      "full_name": "Full name as printed on label including form (e.g. 'Iron (as Ferrochel® Ferrous Bisglycinate Chelate)'). Same as name if no form specified.",
+      "amount": 25,
+      "unit": "mg",
+      "dv_percent": 139,
+      "dv_source": "label",
+      "strains": null
+    }
+  ]
+}
+
+For probiotic nutrients, populate strains as an array: [{"name": "Lactobacillus acidophilus", "cfu": "2.5 billion"}]. For all others set strains to null.
+
+Rules for dv_percent:
+- If you recognize the exact product, use the % DV printed on that product's label. Set dv_source to "label".
+- If unknown exact product, calculate from current FDA RDI values. Set dv_source to "fda_rdi".
+- Set dv_percent and dv_source to null if no DV is established (omega-3, probiotics CFU, etc.).
+- Never invent or estimate a value you are not confident in.
+- Include ALL nutrients listed in the Supplement Facts panel.
+Return ONLY valid JSON. No markdown fences.`
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function getClient() {
+  return new Anthropic({
+    apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
+    dangerouslyAllowBrowser: true,
+  })
+}
+
+function stripFences(text) {
+  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+}
+
+function shapeForm(json) {
+  return {
+    name:             json.name || '',
+    brand:            json.brand || '',
+    category:         json.category || 'Vitamins',
+    dose_per_serving: json.dose_per_serving || '1 cap',
+    servings_per_day: Number(json.servings_per_day) || 1,
+    dose_multiplier:  1,
+    timing:           Array.isArray(json.timing) ? json.timing : [],
+    timing_notes:     json.timing_notes || '',
+    suggested_use:    json.suggested_use || '',
+    cautions:         json.cautions || '',
+    other_ingredients: Array.isArray(json.other_ingredients) ? json.other_ingredients : [],
+    nutrients: Array.isArray(json.nutrients)
+      ? json.nutrients.map(n => ({
+          name:       n.name || '',
+          full_name:  n.full_name || null,
+          amount:     n.amount ?? 0,
+          unit:       n.unit || '',
+          dv_percent: n.dv_percent ?? null,
+          dv_source:  n.dv_source ?? null,
+          strains:    Array.isArray(n.strains) && n.strains.length ? n.strains : null,
+        }))
+      : [],
+  }
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
+// step: 'idle' | 'detecting' | 'selecting' | 'parsing' | 'parsed'
+export default function AddSupplement() {
+  const [query, setQuery]       = useState('')
+  const [step, setStep]         = useState('idle')
+  const [variants, setVariants] = useState([])
+  const [error, setError]       = useState('')
+  const [form, setForm]         = useState(EMPTY_FORM)
+  const [saving, setSaving]     = useState(false)
+  const [saved, setSaved]       = useState(false)
+  const [newIngredient, setNewIngredient] = useState('')
+
+  const { addSupplement } = useSupplements()
+  const navigate = useNavigate()
+
+  // ── AI flow ───────────────────────────────────────────────────────────────
+
+  async function handleAnalyze() {
+    if (!query.trim()) return
+    setStep('detecting')
+    setError('')
+    try {
+      const msg = await getClient().messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 512,
+        system: VARIANT_PROMPT,
+        messages: [{ role: 'user', content: query.trim() }],
+      })
+      const result = JSON.parse(stripFences(msg.content[0].text))
+      if (result.specific || !result.variants?.length) {
+        await runParse(query.trim())
+      } else {
+        setVariants(result.variants)
+        setStep('selecting')
+      }
+    } catch (err) {
+      setError(err.message || 'Could not analyze supplement. Try again.')
+      setStep('idle')
+    }
+  }
+
+  async function handleSelectVariant(variant) {
+    await runParse(variant.query || variant.label)
+  }
+
+  async function runParse(descriptor) {
+    setStep('parsing')
+    setError('')
+    try {
+      const msg = await getClient().messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1500,
+        system: PARSE_PROMPT,
+        messages: [{ role: 'user', content: descriptor }],
+      })
+      setForm(shapeForm(JSON.parse(stripFences(msg.content[0].text))))
+      setStep('parsed')
+    } catch (err) {
+      setError(err.message || 'Failed to parse. Edit the form manually.')
+      setStep('idle')
+    }
+  }
+
+  function handleReset() {
+    setStep('idle'); setVariants([]); setError(''); setForm(EMPTY_FORM); setSaved(false)
+  }
+
+  // ── Save ──────────────────────────────────────────────────────────────────
+
+  async function handleSave() {
+    if (!form.name.trim()) return
+    setSaving(true)
+    await addSupplement(form)
+    setSaving(false); setSaved(true)
+    setTimeout(() => navigate('/stack'), 1200)
+  }
+
+  // ── Form helpers ──────────────────────────────────────────────────────────
+
+  function toggleTiming(value) {
+    setForm(f => ({
+      ...f,
+      timing: f.timing.includes(value) ? f.timing.filter(t => t !== value) : [...f.timing, value],
+    }))
+  }
+
+  function updateNutrient(i, field, value) {
+    setForm(f => {
+      const nutrients = [...f.nutrients]
+      const coerced = field === 'name' || field === 'unit' || field === 'full_name'
+        ? value
+        : value === '' ? null : Number(value)
+      const extra = field === 'dv_percent' ? { dv_source: null } : {}
+      nutrients[i] = { ...nutrients[i], [field]: coerced, ...extra }
+      return { ...f, nutrients }
+    })
+  }
+
+  function addNutrient() {
+    setForm(f => ({ ...f, nutrients: [...f.nutrients, { name: '', full_name: null, amount: 0, unit: 'mg', dv_percent: null, dv_source: null, strains: null }] }))
+  }
+
+  function removeNutrient(i) {
+    setForm(f => ({ ...f, nutrients: f.nutrients.filter((_, j) => j !== i) }))
+  }
+
+  function addIngredient() {
+    const val = newIngredient.trim()
+    if (!val) return
+    setForm(f => ({ ...f, other_ingredients: [...f.other_ingredients, val] }))
+    setNewIngredient('')
+  }
+
+  function removeIngredient(i) {
+    setForm(f => ({ ...f, other_ingredients: f.other_ingredients.filter((_, j) => j !== i) }))
+  }
+
+  const busy      = step === 'detecting' || step === 'parsing'
+  const busyLabel = step === 'detecting' ? 'Checking variants…' : 'Filling in details…'
+  const effectiveDvNutrients = form.nutrients.filter(n => n.dv_percent != null)
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div className="page-title">Add Supplement</div>
+        <div className="page-subtitle">Type a name and let AI fill in the details</div>
+      </div>
+
+      {/* ── AI Autofill ── */}
+      <div className="card">
+        <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Bot size={13} /> AI Autofill
+        </div>
+
+        {step !== 'selecting' && (
+          <div className="form-group">
+            <label>Supplement name or description</label>
+            <textarea
+              placeholder="e.g. Vitamin D3, Nature Made Fish Oil, Magnesium Glycinate 400mg"
+              value={query}
+              onChange={e => { setQuery(e.target.value); if (step !== 'idle') handleReset() }}
+              style={{ minHeight: 68 }}
+              disabled={busy || step === 'parsed'}
+              onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleAnalyze() }}
+            />
+          </div>
+        )}
+
+        {step === 'idle' && (
+          <button className="btn btn-primary btn-full" onClick={handleAnalyze} disabled={!query.trim()}>
+            <Bot size={15} /> Analyze with AI
+          </button>
+        )}
+
+        {busy && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 0', justifyContent: 'center' }}>
+            <div className="spinner" />
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{busyLabel}</span>
+          </div>
+        )}
+
+        {step === 'selecting' && (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>Which version do you have?</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>Multiple versions found for <em>"{query}"</em></div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {variants.map((v, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSelectVariant(v)}
+                  style={{
+                    background: 'var(--bg)', border: '1.5px solid var(--border)',
+                    borderRadius: 10, padding: '12px 14px', textAlign: 'left',
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+                    transition: 'all 0.15s', width: '100%', fontFamily: 'inherit',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--brand)'; e.currentTarget.style.background = 'var(--brand-50)' }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--bg)' }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>{v.label}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{v.descriptor}</div>
+                  </div>
+                  <ChevronRight size={16} color="var(--text-light)" style={{ flexShrink: 0 }} />
+                </button>
+              ))}
+            </div>
+            <button className="btn btn-ghost btn-sm btn-full" onClick={handleReset} style={{ marginTop: 10, gap: 5 }}>
+              <ArrowLeft size={13} /> Edit search
+            </button>
+          </div>
+        )}
+
+        {step === 'parsed' && (
+          <div>
+            <div className="alert alert-success">
+              <CheckCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+              Autofilled — review and edit below, then save.
+            </div>
+            <button className="btn btn-ghost btn-sm btn-full" onClick={handleReset} style={{ marginTop: 8, gap: 5 }}>
+              <ArrowLeft size={13} /> Start over
+            </button>
+          </div>
+        )}
+
+        {error && (
+          <div className="alert alert-danger" style={{ marginTop: 10 }}>
+            <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* ── Supplement Details ── */}
+      <div className="card">
+        <div className="card-title">Supplement Details</div>
+
+        <div className="form-group">
+          <label>Name *</label>
+          <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Product name" />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div className="form-group">
+            <label>Brand</label>
+            <input value={form.brand} onChange={e => setForm(f => ({ ...f, brand: e.target.value }))} placeholder="Brand" />
+          </div>
+          <div className="form-group">
+            <label>Category</label>
+            <select value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}>
+              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div className="form-group">
+            <label>Dose per serving</label>
+            <input value={form.dose_per_serving} onChange={e => setForm(f => ({ ...f, dose_per_serving: e.target.value }))} placeholder="1 cap" />
+          </div>
+          <div className="form-group">
+            <label>Servings / day</label>
+            <input type="number" min="0.5" step="0.5" value={form.servings_per_day}
+              onChange={e => setForm(f => ({ ...f, servings_per_day: Number(e.target.value) }))} />
+          </div>
+        </div>
+
+        {/* Dosage multiplier */}
+        <div className="form-group">
+          <label>Dosage multiplier</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <input
+              type="number" min="1" max="10" step="0.5"
+              value={form.dose_multiplier}
+              onChange={e => setForm(f => ({ ...f, dose_multiplier: Number(e.target.value) }))}
+              style={{ width: 80 }}
+            />
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>× label serving</span>
+          </div>
+          {form.dose_multiplier > 1 && effectiveDvNutrients.length > 0 && (
+            <div style={{ fontSize: 11, color: '#f97316', marginTop: 5, background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 6, padding: '5px 8px' }}>
+              Taking {form.dose_multiplier}× the label dose — % DV values below show your actual intake
+            </div>
+          )}
+        </div>
+
+        <div className="form-group">
+          <label>Timing</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {TIMING_OPTIONS.map(t => (
+              <button
+                key={t.value} type="button"
+                className={`badge ${form.timing.includes(t.value) ? 'badge-green' : 'badge-gray'}`}
+                style={{ cursor: 'pointer', border: '1px solid', borderColor: form.timing.includes(t.value) ? 'var(--brand-200)' : 'var(--border)', padding: '5px 10px', fontSize: 12 }}
+                onClick={() => toggleTiming(t.value)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label>Timing notes</label>
+          <input value={form.timing_notes} onChange={e => setForm(f => ({ ...f, timing_notes: e.target.value }))} placeholder="e.g. Take with food" />
+        </div>
+
+        <div className="form-group">
+          <label>Suggested use</label>
+          <textarea
+            value={form.suggested_use}
+            onChange={e => setForm(f => ({ ...f, suggested_use: e.target.value }))}
+            placeholder="Verbatim suggested use from label…"
+            style={{ minHeight: 60 }}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Cautions / Warnings</label>
+          <textarea
+            value={form.cautions}
+            onChange={e => setForm(f => ({ ...f, cautions: e.target.value }))}
+            placeholder="Any warnings from the label…"
+            style={{ minHeight: 60 }}
+          />
+        </div>
+      </div>
+
+      {/* ── Nutrients ── */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>Nutrients</div>
+          <button className="btn btn-secondary btn-sm" onClick={addNutrient} style={{ gap: 4 }}>
+            <Plus size={12} /> Add
+          </button>
+        </div>
+
+        {form.nutrients.length === 0 && (
+          <p style={{ fontSize: 13, color: '#94a3b8', textAlign: 'center', padding: '12px 0' }}>No nutrients added yet</p>
+        )}
+
+        {/* Column headers */}
+        {form.nutrients.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1.2fr auto', gap: 6, marginBottom: 4, paddingLeft: 2 }}>
+            {['Name', 'Amt', 'Unit', '% DV', ''].map(h => (
+              <div key={h} style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</div>
+            ))}
+          </div>
+        )}
+
+        {form.nutrients.map((n, i) => {
+          const effectiveDv = n.dv_percent != null ? Math.round(n.dv_percent * form.dose_multiplier) : null
+          return (
+            <div key={i} style={{ marginBottom: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1.2fr auto', gap: 6, alignItems: 'center' }}>
+                <input placeholder="Name" value={n.name} onChange={e => updateNutrient(i, 'name', e.target.value)} style={{ fontSize: 12, padding: '7px 9px' }} />
+                <input placeholder="Amt" type="number" value={n.amount ?? ''} onChange={e => updateNutrient(i, 'amount', e.target.value)} style={{ fontSize: 12, padding: '7px 9px' }} />
+                <input placeholder="Unit" value={n.unit} onChange={e => updateNutrient(i, 'unit', e.target.value)} style={{ fontSize: 12, padding: '7px 9px' }} />
+                <div style={{ position: 'relative' }}>
+                  <input placeholder="% DV" type="number" value={n.dv_percent ?? ''} onChange={e => updateNutrient(i, 'dv_percent', e.target.value)} style={{ fontSize: 12, padding: '7px 9px' }} />
+                  {n.dv_source && (
+                    <span style={{
+                      position: 'absolute', right: 5, top: '50%', transform: 'translateY(-50%)',
+                      fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 4, pointerEvents: 'none',
+                      background: n.dv_source === 'label' ? '#e8f4ef' : '#eff6ff',
+                      color: n.dv_source === 'label' ? '#1a6b4a' : '#1d4ed8',
+                    }}>
+                      {n.dv_source === 'label' ? 'LABEL' : 'RDI'}
+                    </span>
+                  )}
+                </div>
+                <button className="btn btn-icon btn-ghost btn-sm" onClick={() => removeNutrient(i)} style={{ padding: 6 }}>
+                  <Trash2 size={13} color="#ef4444" />
+                </button>
+              </div>
+              {/* Effective DV preview when multiplier > 1 */}
+              {form.dose_multiplier > 1 && effectiveDv != null && (
+                <div style={{ fontSize: 10, color: '#f97316', marginTop: 3, paddingLeft: 4 }}>
+                  Effective at {form.dose_multiplier}×: {effectiveDv}% DV
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* ── Other Ingredients ── */}
+      <div className="card">
+        <div className="card-title">Other Ingredients</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: form.other_ingredients.length ? 10 : 0 }}>
+          {form.other_ingredients.map((ing, i) => (
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--border-light)', borderRadius: 99, padding: '4px 10px', fontSize: 12, color: 'var(--text-muted)' }}>
+              {ing}
+              <button onClick={() => removeIngredient(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', padding: 0 }}>
+                <X size={11} color="#94a3b8" />
+              </button>
+            </span>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            placeholder="e.g. Hypromellose (capsule)"
+            value={newIngredient}
+            onChange={e => setNewIngredient(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addIngredient() } }}
+            style={{ flex: 1 }}
+          />
+          <button className="btn btn-secondary btn-sm" onClick={addIngredient} style={{ gap: 4, flexShrink: 0 }}>
+            <Plus size={12} /> Add
+          </button>
+        </div>
+      </div>
+
+      {/* ── Save ── */}
+      <button
+        className="btn btn-primary btn-full"
+        onClick={handleSave}
+        disabled={!form.name.trim() || saving || saved}
+        style={{ marginTop: 4 }}
+      >
+        {saved
+          ? <><CheckCircle size={16} /> Saved!</>
+          : saving
+          ? <><div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Saving…</>
+          : <><Save size={16} /> Save to Stack</>
+        }
+      </button>
+
+      <p style={{ fontSize: 11, color: '#94a3b8', textAlign: 'center', marginTop: 10, lineHeight: 1.5 }}>
+        AI analysis uses Claude Haiku. API key is in your browser bundle —<br />
+        proxy via a backend before sharing this app.
+      </p>
+    </div>
+  )
+}
