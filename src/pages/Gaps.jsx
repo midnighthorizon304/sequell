@@ -1,5 +1,7 @@
-import { AlertTriangle, TrendingUp, Zap, Info, XCircle, CheckCircle } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, TrendingUp, Zap, Info, XCircle, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { useSupplements } from '../context/SupplementContext'
+import { usePreferences } from '../hooks/usePreferences'
 import { KEY_NUTRIENTS } from '../lib/defaultData'
 
 function ScoreGauge({ pct }) {
@@ -58,14 +60,14 @@ const MONITOR_FLAGS = [
     name: 'Vitamin D3',
     dv: 375,
     icon: '☀️',
-    note: '250% from standalone + 125% from Multi. 375% DV = 7,500 IU/day is above the typical 2,000 IU recommendation but below the 4,000 IU (10,000% …no, 100 mcg = 4,000 IU) tolerable upper limit. Monitor 25(OH)D blood levels.',
+    note: '250% from standalone + 125% from Multi. 375% DV = 7,500 IU/day is above the typical 2,000 IU recommendation but below the 4,000 IU tolerable upper limit. Monitor 25(OH)D blood levels.',
     status: 'warn',
   },
   {
     name: 'Vitamin B12',
     dv: 750,
     icon: '⚡',
-    note: '18mcg from Multi = 750% DV. B12 has no established upper limit (UL) — excess is excreted. However, very high doses (>1mg/day) may cause acne in some people. 750% DV = 18mcg, which is well within safe range.',
+    note: '18mcg from Multi = 750% DV. B12 has no established upper limit — excess is excreted. However, very high doses (>1mg/day) may cause acne in some people. 750% DV = 18mcg, which is well within safe range.',
     status: 'info',
   },
   {
@@ -102,6 +104,12 @@ const SYNERGIES = [
 
 export default function Gaps() {
   const { supplements, loading, aggregateNutrients } = useSupplements()
+  const { prefs, setPref } = usePreferences({ gaps_acknowledged: {} })
+  const acknowledged = prefs.gaps_acknowledged || {}
+
+  const [acknowledging, setAcknowledging] = useState(null)
+  const [noteInput, setNoteInput] = useState('')
+  const [showAcknowledged, setShowAcknowledged] = useState(false)
 
   if (loading) return (
     <div className="loading-center">
@@ -113,6 +121,69 @@ export default function Gaps() {
   const nutrientTotals = aggregateNutrients()
   const covered = KEY_NUTRIENTS.filter(n => (nutrientTotals[n] || 0) >= 50).length
   const coveragePct = Math.round((covered / KEY_NUTRIENTS.length) * 100)
+
+  function doAcknowledge(name) {
+    const next = { ...acknowledged, [name]: { note: noteInput.trim(), ts: new Date().toISOString() } }
+    setPref('gaps_acknowledged', next)
+    setAcknowledging(null)
+    setNoteInput('')
+  }
+
+  function undoAcknowledge(name) {
+    const next = { ...acknowledged }
+    delete next[name]
+    setPref('gaps_acknowledged', next)
+  }
+
+  function startAcknowledge(name) {
+    setAcknowledging(name)
+    setNoteInput('')
+  }
+
+  function cancelAcknowledge() {
+    setAcknowledging(null)
+    setNoteInput('')
+  }
+
+  const activeGaps  = CRITICAL_GAPS.filter(g => !acknowledged[g.name])
+  const activeFlags = MONITOR_FLAGS.filter(f => !acknowledged[f.name])
+  const allAcknowledged = [
+    ...CRITICAL_GAPS.filter(g => acknowledged[g.name]).map(g => ({ ...g, type: 'gap' })),
+    ...MONITOR_FLAGS.filter(f => acknowledged[f.name]).map(f => ({ ...f, type: 'flag' })),
+  ]
+
+  function AcknowledgeInline({ name }) {
+    if (acknowledging !== name) return null
+    return (
+      <div style={{ marginTop: 10 }}>
+        <input
+          placeholder="Optional note (e.g. 'Reviewing with doctor')"
+          value={noteInput}
+          onChange={e => setNoteInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') doAcknowledge(name); if (e.key === 'Escape') cancelAcknowledge() }}
+          autoFocus
+          style={{ fontSize: 12, padding: '7px 10px', marginBottom: 7 }}
+        />
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button className="btn btn-primary btn-sm" onClick={() => doAcknowledge(name)}>Confirm</button>
+          <button className="btn btn-ghost btn-sm" onClick={cancelAcknowledge}>Cancel</button>
+        </div>
+      </div>
+    )
+  }
+
+  function AcknowledgeBtn({ name }) {
+    if (acknowledging === name) return null
+    return (
+      <button
+        className="btn btn-ghost btn-sm"
+        style={{ marginTop: 8, fontSize: 11, padding: '4px 10px', gap: 4, color: 'var(--text-light)' }}
+        onClick={() => startAcknowledge(name)}
+      >
+        <CheckCircle size={11} /> Acknowledge
+      </button>
+    )
+  }
 
   return (
     <div className="page">
@@ -128,12 +199,15 @@ export default function Gaps() {
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Stack Coverage Score</div>
           <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
             {covered} of {KEY_NUTRIENTS.length} key nutrients at ≥50% DV.<br />
-            3 critical gaps identified.
+            {activeGaps.length} critical gap{activeGaps.length !== 1 ? 's' : ''} identified.
           </div>
           <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            <span className="badge badge-red">3 Gaps</span>
-            <span className="badge badge-yellow">3 Flags</span>
+            <span className="badge badge-red">{activeGaps.length} Gaps</span>
+            <span className="badge badge-yellow">{activeFlags.length} Flags</span>
             <span className="badge badge-green">4 Synergies</span>
+            {allAcknowledged.length > 0 && (
+              <span className="badge badge-gray">{allAcknowledged.length} Acknowledged</span>
+            )}
           </div>
         </div>
       </div>
@@ -145,7 +219,9 @@ export default function Gaps() {
           Critical Gaps
         </div>
 
-        {CRITICAL_GAPS.map(g => (
+        {activeGaps.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '6px 0 2px' }}>All gaps acknowledged.</div>
+        ) : activeGaps.map(g => (
           <div key={g.name} className="gap-card" style={{ borderLeftColor: '#ef4444' }}>
             <div style={{ width: 36, height: 36, borderRadius: 10, background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <AlertTriangle size={16} color="#ef4444" />
@@ -160,6 +236,8 @@ export default function Gaps() {
               <div style={{ marginTop: 8, padding: '8px 10px', background: '#fff7ed', borderRadius: 7, fontSize: 12, color: '#92400e', border: '1px solid #fde68a' }}>
                 <strong>Suggestion:</strong> {g.suggestion}
               </div>
+              <AcknowledgeInline name={g.name} />
+              <AcknowledgeBtn name={g.name} />
             </div>
           </div>
         ))}
@@ -172,7 +250,9 @@ export default function Gaps() {
           Monitor Flags
         </div>
 
-        {MONITOR_FLAGS.map(f => (
+        {activeFlags.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '6px 0 2px' }}>All flags acknowledged.</div>
+        ) : activeFlags.map(f => (
           <div key={f.name} className="gap-card" style={{ borderLeftColor: f.status === 'warn' ? '#f59e0b' : '#3b82f6' }}>
             <div style={{ width: 36, height: 36, borderRadius: 10, background: f.status === 'warn' ? '#fffbeb' : '#eff6ff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 18 }}>
               {f.icon}
@@ -183,6 +263,8 @@ export default function Gaps() {
                 <span className={`badge ${f.status === 'warn' ? 'badge-yellow' : 'badge-blue'}`}>{f.dv}% DV</span>
               </div>
               <div className="gap-card-desc" style={{ marginTop: 4 }}>{f.note}</div>
+              <AcknowledgeInline name={f.name} />
+              <AcknowledgeBtn name={f.name} />
             </div>
           </div>
         ))}
@@ -192,7 +274,7 @@ export default function Gaps() {
       <div className="gap-section">
         <div className="gap-section-title" style={{ color: '#14532d' }}>
           <Zap size={14} color="#22c55e" />
-          Synergies & Interactions
+          Synergies &amp; Interactions
         </div>
 
         {SYNERGIES.map(s => (
@@ -215,6 +297,55 @@ export default function Gaps() {
           </div>
         ))}
       </div>
+
+      {/* Acknowledged section */}
+      {allAcknowledged.length > 0 && (
+        <div className="gap-section">
+          <button
+            onClick={() => setShowAcknowledged(v => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              background: 'none', border: 'none', cursor: 'pointer',
+              padding: '6px 0', fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <span className="gap-section-title" style={{ color: 'var(--text-light)', marginBottom: 0, flex: 1, justifyContent: 'flex-start' }}>
+              <CheckCircle size={14} color="var(--text-light)" />
+              Acknowledged ({allAcknowledged.length})
+            </span>
+            {showAcknowledged ? <ChevronUp size={14} color="var(--text-light)" /> : <ChevronDown size={14} color="var(--text-light)" />}
+          </button>
+
+          {showAcknowledged && (
+            <div style={{ marginTop: 4 }}>
+              {allAcknowledged.map(item => (
+                <div key={item.name} className="gap-card" style={{ borderLeftColor: 'var(--border)', opacity: 0.7 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <CheckCircle size={16} color="var(--text-light)" />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <div className="gap-card-name" style={{ color: 'var(--text-muted)', fontSize: 13 }}>{item.name}</div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        style={{ fontSize: 11, padding: '3px 8px', flexShrink: 0 }}
+                        onClick={() => undoAcknowledge(item.name)}
+                      >
+                        Undo
+                      </button>
+                    </div>
+                    {acknowledged[item.name]?.note && (
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, fontStyle: 'italic' }}>
+                        "{acknowledged[item.name].note}"
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="alert alert-success" style={{ marginTop: 4 }}>
         <Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />

@@ -95,7 +95,7 @@ body {
 }
 
 .page {
-  padding: 18px 14px calc(var(--nav-height) + 18px);
+  padding: 18px 14px calc(var(--nav-height) + 28px + env(safe-area-inset-bottom, 0px));
 }
 
 .bottom-nav {

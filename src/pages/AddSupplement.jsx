@@ -73,8 +73,8 @@ const PARSE_PROMPT = `You are a supplement label data extractor. Given a specifi
   "other_ingredients": ["Inactive ingredients exactly as on the label, e.g. 'Hypromellose (capsule)', 'Microcrystalline Cellulose', 'Silicon Dioxide'"],
   "nutrients": [
     {
-      "name": "Short base nutrient name for tracking (e.g. 'Iron', 'Vitamin D3', 'Magnesium')",
-      "full_name": "Full name as printed on label including form (e.g. 'Iron (as Ferrochel® Ferrous Bisglycinate Chelate)'). Same as name if no form specified.",
+      "name": "Short tracking name — base nutrient without form or brand, used for aggregation across supplements (e.g. 'Iron', 'Vitamin C', 'Vitamin D3', 'Magnesium')",
+      "full_name": "COMPLETE name exactly as printed on label — ALWAYS include the parenthetical form when one is listed (e.g. 'Iron (as Ferrochel® Ferrous Bisglycinate Chelate)', 'Vitamin C (as Ascorbic Acid)', 'Magnesium (as Magnesium Glycinate)', 'Zinc (as Zinc Bisglycinate Chelate)'). Set equal to name ONLY when the label lists no form.",
       "amount": 25,
       "unit": "mg",
       "dv_percent": 139,
@@ -105,7 +105,13 @@ function getClient() {
 }
 
 function stripFences(text) {
-  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  let s = text.trim()
+  s = s.replace(/^```[a-zA-Z]*\r?\n?/, '').replace(/\r?\n?```\s*$/, '').trim()
+  if (!s.startsWith('{') && !s.startsWith('[')) {
+    const m = s.match(/(\{[\s\S]*\}|\[[\s\S]*\])/)
+    if (m) s = m[1]
+  }
+  return s
 }
 
 function shapeForm(json) {
@@ -206,7 +212,9 @@ export default function AddSupplement() {
         setStep('selecting')
       }
     } catch (err) {
-      setError(err.message || 'Could not analyze supplement. Try again.')
+      setError(err instanceof SyntaxError
+        ? 'AI returned unexpected data. Try again or select a variant manually.'
+        : (err.message || 'Could not analyze supplement. Try again.'))
       setStep('idle')
     }
   }
@@ -221,14 +229,16 @@ export default function AddSupplement() {
     try {
       const msg = await getClient().messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1500,
+        max_tokens: 2000,
         system: PARSE_PROMPT,
         messages: [{ role: 'user', content: descriptor }],
       })
       setForm(shapeForm(JSON.parse(stripFences(msg.content[0].text))))
       setStep('parsed')
     } catch (err) {
-      setError(err.message || 'Failed to parse. Edit the form manually.')
+      setError(err instanceof SyntaxError
+        ? 'AI returned unexpected data. Try again or fill in the form manually.'
+        : (err.message || 'Failed to parse supplement data. Try again.'))
       setStep('idle')
     }
   }
