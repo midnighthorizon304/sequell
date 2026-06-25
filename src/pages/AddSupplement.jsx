@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
-import { Bot, Save, Plus, Trash2, AlertCircle, CheckCircle, ChevronRight, ArrowLeft, X } from 'lucide-react'
+import { Bot, Save, Plus, Trash2, AlertCircle, CheckCircle, ChevronRight, ArrowLeft, X, AlertTriangle, ShieldCheck } from 'lucide-react'
 import { useSupplements } from '../context/SupplementContext'
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -157,6 +157,7 @@ export default function AddSupplement() {
   const [saving, setSaving]     = useState(false)
   const [saved, setSaved]       = useState(false)
   const [newIngredient, setNewIngredient] = useState('')
+  const [verificationDismissed, setVerificationDismissed] = useState(false)
 
   const { addSupplement, updateSupplement, supplements } = useSupplements()
   const navigate = useNavigate()
@@ -245,17 +246,23 @@ export default function AddSupplement() {
 
   function handleReset() {
     setStep('idle'); setVariants([]); setError(''); setForm(EMPTY_FORM); setSaved(false)
+    setVerificationDismissed(false)
   }
 
   // ── Save ──────────────────────────────────────────────────────────────────
 
-  async function handleSave() {
+  async function handleSave(isVerified = false) {
     if (!form.name.trim()) return
     setSaving(true)
+    const payload = {
+      ...form,
+      verified:    isVerified,
+      verified_at: isVerified ? new Date().toISOString() : null,
+    }
     if (isEdit) {
-      await updateSupplement(editId, form)
+      await updateSupplement(editId, payload)
     } else {
-      await addSupplement(form)
+      await addSupplement(payload)
     }
     setSaving(false); setSaved(true)
     setTimeout(() => navigate('/stack'), 1200)
@@ -581,22 +588,63 @@ export default function AddSupplement() {
         </div>
       </div>
 
-      {/* ── Save ── */}
-      <button
-        className="btn btn-primary btn-full"
-        onClick={handleSave}
-        disabled={!form.name.trim() || saving || saved}
-        style={{ marginTop: 4 }}
-      >
-        {saved
-          ? <><CheckCircle size={16} /> Saved!</>
-          : saving
-          ? <><div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Saving…</>
-          : isEdit
-          ? <><Save size={16} /> Save Changes</>
-          : <><Save size={16} /> Save to Stack</>
-        }
-      </button>
+      {/* ── Verification banner (AI autofill path only) ── */}
+      {step === 'parsed' && !verificationDismissed && !saved && (
+        <div style={{
+          background: '#fffbeb', border: '1.5px solid #f59e0b', borderRadius: 12,
+          padding: '14px 14px 12px', marginTop: 4,
+        }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
+            <AlertTriangle size={15} color="#d97706" style={{ flexShrink: 0, marginTop: 1 }} />
+            <p style={{ fontSize: 12, color: '#92400e', lineHeight: 1.55, margin: 0 }}>
+              <strong>Please verify this data matches your product label.</strong>{' '}
+              The information below was pulled from your photo and/or our supplement database.
+              Dosages, nutrients, and % Daily Values can vary between product versions and lot dates.
+              Please confirm the details match what's printed on your bottle before saving.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn btn-secondary btn-full"
+              onClick={() => setVerificationDismissed(true)}
+              disabled={saving}
+              style={{ flex: 1 }}
+            >
+              Edit
+            </button>
+            <button
+              className="btn btn-primary btn-full"
+              onClick={() => handleSave(true)}
+              disabled={!form.name.trim() || saving}
+              style={{ flex: 2, background: '#059669', borderColor: '#059669' }}
+            >
+              {saving
+                ? <><div className="spinner" style={{ width: 15, height: 15, borderWidth: 2 }} /> Saving…</>
+                : <><ShieldCheck size={15} /> Looks good — Save</>
+              }
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Regular save (manual entry or after dismissing banner) ── */}
+      {(step !== 'parsed' || verificationDismissed) && (
+        <button
+          className="btn btn-primary btn-full"
+          onClick={() => handleSave(false)}
+          disabled={!form.name.trim() || saving || saved}
+          style={{ marginTop: 4 }}
+        >
+          {saved
+            ? <><CheckCircle size={16} /> Saved!</>
+            : saving
+            ? <><div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Saving…</>
+            : isEdit
+            ? <><Save size={16} /> Save Changes</>
+            : <><Save size={16} /> Save to Stack</>
+          }
+        </button>
+      )}
 
       <p style={{ fontSize: 11, color: '#94a3b8', textAlign: 'center', marginTop: 10, lineHeight: 1.5 }}>
         AI analysis uses Claude Haiku. API key is in your browser bundle —<br />

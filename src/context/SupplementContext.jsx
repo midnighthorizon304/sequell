@@ -69,17 +69,25 @@ export function SupplementProvider({ children }) {
   }
 
   async function addSupplement(supplement) {
-    try {
-      const { data, error: err } = await supabase
-        .from('supplements')
-        .insert([supplement])
-        .select()
-        .single()
+    async function doInsert(payload) {
+      const { data, error: err } = await supabase.from('supplements').insert([payload]).select().single()
       if (err) throw err
-      const normalized = normalizeSupp(data)
+      return normalizeSupp(data)
+    }
+    try {
+      const normalized = await doInsert(supplement)
       setSupplements(prev => [...prev, normalized])
       return { data: normalized, error: null }
     } catch (err) {
+      // verified columns may not exist yet — retry without them
+      if (err.message?.toLowerCase().includes('verified')) {
+        try {
+          const { verified: _v, verified_at: _va, ...rest } = supplement
+          const normalized = await doInsert(rest)
+          setSupplements(prev => [...prev, normalized])
+          return { data: normalized, error: null }
+        } catch (_) {}
+      }
       const fallback = { ...supplement, id: String(Date.now()), created_at: new Date().toISOString() }
       setSupplements(prev => [...prev, fallback])
       return { data: fallback, error: null }
@@ -92,7 +100,13 @@ export function SupplementProvider({ children }) {
       const { error: err } = await supabase.from('supplements').update(data).eq('id', id)
       if (err) throw err
     } catch (err) {
-      console.warn('Update failed:', err.message)
+      // verified columns may not exist yet — retry without them
+      if (err.message?.toLowerCase().includes('verified')) {
+        const { verified: _v, verified_at: _va, ...rest } = data
+        await supabase.from('supplements').update(rest).eq('id', id).catch(() => {})
+      } else {
+        console.warn('Update failed:', err.message)
+      }
     }
   }
 

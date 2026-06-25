@@ -5,6 +5,11 @@ import { useSupplements } from '../context/SupplementContext'
 import { TIMING_LABELS, CATEGORY_COLORS } from '../lib/defaultData'
 import ConfirmModal from '../components/ConfirmModal'
 
+function formatVerifiedDate(iso) {
+  if (!iso) return ''
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 function dvColor(dv) {
   if (!dv || dv === 0) return '#ef4444'
   if (dv < 50)  return '#f59e0b'
@@ -67,6 +72,15 @@ function SupplementCard({ supp, onDeleteRequest }) {
           {(supp.timing || []).map(t => (
             <span key={t} className="badge badge-blue">{TIMING_LABELS[t] || t}</span>
           ))}
+          {supp.verified ? (
+            <span className="badge" style={{ background: '#ecfdf5', color: '#059669', border: '1px solid #6ee7b7', fontSize: 10 }}>
+              Verified ✓ {formatVerifiedDate(supp.verified_at)}
+            </span>
+          ) : (
+            <span className="badge" style={{ background: '#f8fafc', color: '#94a3b8', border: '1px solid #e2e8f0', fontSize: 10 }}>
+              AI Generated
+            </span>
+          )}
         </div>
 
         {/* Timing note */}
