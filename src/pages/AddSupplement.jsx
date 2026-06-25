@@ -628,7 +628,7 @@ export default function AddSupplement() {
       )}
 
       {/* ── Regular save (manual entry or after dismissing banner) ── */}
-      {(step !== 'parsed' || verificationDismissed) && (
+      {(step !== 'parsed' || verificationDismissed || saved) && (
         <button
           className="btn btn-primary btn-full"
           onClick={() => handleSave(false)}
