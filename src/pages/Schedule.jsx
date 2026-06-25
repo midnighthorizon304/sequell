@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Clock, AlertTriangle, Sun, Moon, Pill, Timer } from 'lucide-react'
 import { usePreferences } from '../hooks/usePreferences'
+import { useSupplements } from '../context/SupplementContext'
 
 // ── Time helpers ─────────────────────────────────────────────────────────────
 
@@ -22,89 +23,111 @@ function parseMinutes(time24) {
   return h * 60 + m
 }
 
-// ── Schedule builders ─────────────────────────────────────────────────────────
+// ── Dynamic schedule builder ──────────────────────────────────────────────────
+// Reads supplement timing from context — adding/removing supplements in the
+// database automatically updates the schedule.
 
-const WEGOVY = (wakeTime) => ({
-  time: wakeTime, label: 'Wake',
-  items: ['Wegovy oral 1.5mg'],
-  note: 'Empty stomach — no food, water, or supplements for 30 min',
-  type: 'rx', warning: true,
-})
-
-const IRON = (wakeMin) => ({
-  time: addMins(wakeMin, 30), label: 'Wake + 30 min',
-  items: ['Thorne Iron Bisglycinate 25mg', 'Vitamin C 500mg'],
-  note: 'Empty stomach · Wegovy lockout window now clear',
-  type: 'normal',
-})
-
-const FAT_SOLUBLES = (time, label, note) => ({
-  time, label,
-  items: ['Nature Made Multi For Him', 'Vitamin D3 2000 IU', 'Fish Oil 1200mg (2 softgels)'],
-  note,
-  type: 'meal',
-})
-
-const PROBIOTIC = (time) => ({
-  time, label: 'Mid-Window',
-  items: ['Probiotic-10 25B (1–2 caps)'],
-  note: 'Between meals for best colonization',
-  type: 'normal',
-})
-
-const EVENING = (time) => ({
-  time, label: 'Dinner',
-  items: ['Magnesium Glycinate 200mg (2 caps)', 'Neuro-Mag / Magnesium L-Threonate (3 caps)'],
-  note: 'With dinner · supports sleep and cognition',
-  type: 'normal',
-})
-
-function buildWeekdaySchedule(wakeTime, fastingEnabled, eatStart, eatEnd) {
-  const wakeMin = parseMinutes(wakeTime)
-
-  if (!fastingEnabled) {
-    const breakfast = addMins(wakeMin, 60)
-    return [
-      WEGOVY(wakeTime),
-      IRON(wakeMin),
-      FAT_SOLUBLES(breakfast, 'Breakfast', 'Fat-solubles with first meal of the day'),
-      PROBIOTIC(addMins(wakeMin, 180)),
-      EVENING(addMins(wakeMin, 660)),
-    ]
-  }
-
+function buildSchedule(supplements, mode, wakeTime, fastingEnabled, eatStart, eatEnd) {
+  const wakeMin     = parseMinutes(wakeTime)
   const eatStartMin = parseMinutes(eatStart)
   const eatEndMin   = parseMinutes(eatEnd)
+  const isWeekdayFast = fastingEnabled && mode === 'weekday'
 
-  return [
-    WEGOVY(wakeTime),
-    IRON(wakeMin),
-    FAT_SOLUBLES(eatStart, 'Eating Window Opens', 'First meal · fat-soluble vitamins with food'),
-    PROBIOTIC(addMins(eatStartMin, 180)),
-    EVENING(addMins(eatEndMin, -30)),
-    {
+  function getItems(timingKey) {
+    return supplements
+      .filter(s => (s.timing || []).includes(timingKey))
+      .map(s => s.name)
+  }
+
+  const hasWakeRx = supplements.some(
+    s => (s.timing || []).includes('wake') && s.category === 'Prescription'
+  )
+
+  const wakeItems      = getItems('wake')
+  const wake30Items    = getItems('wake_30')
+  const firstMealItems = getItems('first_meal')
+  const betweenItems   = getItems('between_meals')
+  const eveningItems   = getItems('evening')
+  const bedtimeItems   = getItems('bedtime')
+
+  const slots = []
+
+  if (wakeItems.length) {
+    slots.push({
+      time: wakeTime, label: 'Wake',
+      items: wakeItems,
+      note: hasWakeRx ? 'Empty stomach — no food, water, or supplements for 30 min' : '',
+      type: hasWakeRx ? 'rx' : 'normal',
+      warning: hasWakeRx,
+    })
+  }
+
+  if (wake30Items.length) {
+    slots.push({
+      time: addMins(wakeMin, 30), label: 'Wake + 30 min',
+      items: wake30Items,
+      note: hasWakeRx ? 'Empty stomach · Wegovy lockout window now clear' : 'Empty stomach',
+      type: 'normal',
+    })
+  }
+
+  if (firstMealItems.length) {
+    slots.push({
+      time:  isWeekdayFast ? eatStart : addMins(wakeMin, 60),
+      label: isWeekdayFast ? 'Eating Window Opens' : 'Breakfast',
+      items: firstMealItems,
+      note:  isWeekdayFast
+        ? 'First meal · fat-soluble vitamins with food'
+        : 'Fat-solubles with first meal of the day',
+      type: 'meal',
+    })
+  }
+
+  if (betweenItems.length) {
+    slots.push({
+      time: addMins(isWeekdayFast ? eatStartMin : wakeMin, 180),
+      label: 'Mid-Window',
+      items: betweenItems,
+      note: 'Between meals for best colonization',
+      type: 'normal',
+    })
+  }
+
+  if (eveningItems.length) {
+    slots.push({
+      time: isWeekdayFast ? addMins(eatEndMin, -30) : addMins(wakeMin, 660),
+      label: 'Dinner',
+      items: eveningItems,
+      note: 'With dinner',
+      type: 'normal',
+    })
+  }
+
+  if (isWeekdayFast) {
+    slots.push({
       time: eatEnd, label: 'Eating Window Closes', items: [],
       note: `Fast begins — next eating at ${fmt12(eatStart)}`,
       type: 'fast',
-    },
-  ]
-}
+    })
+  }
 
-function buildWeekendSchedule(wakeTime) {
-  const wakeMin = parseMinutes(wakeTime)
-  return [
-    WEGOVY(wakeTime),
-    IRON(wakeMin),
-    FAT_SOLUBLES(addMins(wakeMin, 60), 'Breakfast', 'Fat-solubles move to breakfast on weekends'),
-    PROBIOTIC(addMins(wakeMin, 180)),
-    EVENING(addMins(wakeMin, 660)),
-  ]
+  if (bedtimeItems.length) {
+    slots.push({
+      time: addMins(wakeMin, 15 * 60),
+      label: 'Bedtime',
+      items: bedtimeItems,
+      note: 'Before sleep — take together',
+      type: 'normal',
+    })
+  }
+
+  return slots
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const TYPE_COLORS  = { rx: '#ef4444', meal: '#1a6b4a', fast: '#8b5cf6', normal: '#3b82f6' }
-const TYPE_LABELS  = { rx: 'Rx', meal: 'Meal', fast: 'Fast', normal: '' }
+const TYPE_COLORS = { rx: '#ef4444', meal: '#1a6b4a', fast: '#8b5cf6', normal: '#3b82f6' }
+const TYPE_LABELS = { rx: 'Rx', meal: 'Meal', fast: 'Fast', normal: '' }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -112,21 +135,23 @@ export default function Schedule() {
   const defaultMode = [0, 6].includes(new Date().getDay()) ? 'weekend' : 'weekday'
   const [mode, setMode] = useState(defaultMode)
 
+  const { supplements, loading } = useSupplements()
+
   const { prefs, setPref } = usePreferences({
-    fasting_enabled:    true,
-    eat_window_start:   '11:30',
-    eat_window_end:     '19:30',
-    wake_time_weekday:  localStorage.getItem('sequell_wake') || '07:00',
-    wake_time_weekend:  localStorage.getItem('sequell_wake') || '08:00',
+    fasting_enabled:   true,
+    eat_window_start:  '11:30',
+    eat_window_end:    '19:30',
+    wake_time_weekday: localStorage.getItem('sequell_wake') || '07:00',
+    wake_time_weekend: localStorage.getItem('sequell_wake') || '08:00',
   })
 
   const { fasting_enabled, eat_window_start, eat_window_end, wake_time_weekday, wake_time_weekend } = prefs
   const wakeTime = mode === 'weekday' ? wake_time_weekday : wake_time_weekend
   const showFastingWindow = mode === 'weekday' && fasting_enabled
 
-  const schedule = mode === 'weekday'
-    ? buildWeekdaySchedule(wakeTime, fasting_enabled, eat_window_start, eat_window_end)
-    : buildWeekendSchedule(wakeTime)
+  const schedule = buildSchedule(
+    supplements, mode, wakeTime, fasting_enabled, eat_window_start, eat_window_end
+  )
 
   const nowMin    = new Date().getHours() * 60 + new Date().getMinutes()
   const nextIndex = schedule.findIndex(s => parseMinutes(s.time) > nowMin)
@@ -174,7 +199,7 @@ export default function Schedule() {
 
         <div className="divider" style={{ margin: '14px 0' }} />
 
-        {/* Row 2: fasting toggle */}
+        {/* Row 3: fasting toggle */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -184,7 +209,6 @@ export default function Schedule() {
               {fasting_enabled ? 'Eating window active' : 'No eating window restriction'}
             </div>
           </div>
-          {/* Toggle switch */}
           <button
             onClick={() => setPref('fasting_enabled', !fasting_enabled)}
             style={{
@@ -202,25 +226,17 @@ export default function Schedule() {
           </button>
         </div>
 
-        {/* Row 3: eating window times (weekday + fasting ON) */}
+        {/* Row 4: eating window times (weekday + fasting ON) */}
         {showFastingWindow && (
           <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'flex-end' }}>
             <div style={{ flex: 1 }}>
               <label>Window opens</label>
-              <input
-                type="time"
-                value={eat_window_start}
-                onChange={e => setPref('eat_window_start', e.target.value)}
-              />
+              <input type="time" value={eat_window_start} onChange={e => setPref('eat_window_start', e.target.value)} />
             </div>
             <div style={{ paddingBottom: 10, color: 'var(--text-muted)', fontSize: 18, fontWeight: 300 }}>→</div>
             <div style={{ flex: 1 }}>
               <label>Window closes</label>
-              <input
-                type="time"
-                value={eat_window_end}
-                onChange={e => setPref('eat_window_end', e.target.value)}
-              />
+              <input type="time" value={eat_window_end} onChange={e => setPref('eat_window_end', e.target.value)} />
             </div>
           </div>
         )}
@@ -248,77 +264,84 @@ export default function Schedule() {
       </div>
 
       {/* Timeline */}
-      <div className="timeline">
-        {schedule.map((slot, i) => {
-          const isLast     = i === schedule.length - 1
-          const isNextDose = i === nextIndex
-          const color      = TYPE_COLORS[slot.type] || '#64748b'
+      {loading ? (
+        <div className="loading-center">
+          <div className="spinner" />
+          Loading schedule…
+        </div>
+      ) : (
+        <div className="timeline">
+          {schedule.map((slot, i) => {
+            const isLast     = i === schedule.length - 1
+            const isNextDose = i === nextIndex
+            const color      = TYPE_COLORS[slot.type] || '#64748b'
 
-          return (
-            <div className="tl-row" key={i}>
-              <div className="tl-spine">
-                <div
-                  className="tl-dot"
-                  style={{
-                    color,
-                    background: isNextDose ? color : 'white',
-                    boxShadow: isNextDose
-                      ? `0 0 0 3px ${color}30, 0 0 0 2px ${color}`
-                      : `0 0 0 2px ${color}`,
-                  }}
-                />
-                {!isLast && <div className="tl-line" />}
-              </div>
-
-              <div className="tl-body">
-                <div className="tl-time">
-                  {fmt12(slot.time)}
-                  {isNextDose && (
-                    <span style={{ marginLeft: 7, fontSize: 10, background: color, color: 'white', borderRadius: 99, padding: '1px 7px', fontWeight: 600, verticalAlign: 'middle' }}>
-                      NEXT
-                    </span>
-                  )}
+            return (
+              <div className="tl-row" key={i}>
+                <div className="tl-spine">
+                  <div
+                    className="tl-dot"
+                    style={{
+                      color,
+                      background: isNextDose ? color : 'white',
+                      boxShadow: isNextDose
+                        ? `0 0 0 3px ${color}30, 0 0 0 2px ${color}`
+                        : `0 0 0 2px ${color}`,
+                    }}
+                  />
+                  {!isLast && <div className="tl-line" />}
                 </div>
 
-                <div className="tl-card" style={{ borderLeft: `3px solid ${color}` }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-                    <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>{slot.label}</div>
-                    {TYPE_LABELS[slot.type] && (
-                      <span className="badge" style={{ background: color + '18', color, border: `1px solid ${color}40`, fontSize: 10, flexShrink: 0 }}>
-                        {TYPE_LABELS[slot.type]}
+                <div className="tl-body">
+                  <div className="tl-time">
+                    {fmt12(slot.time)}
+                    {isNextDose && (
+                      <span style={{ marginLeft: 7, fontSize: 10, background: color, color: 'white', borderRadius: 99, padding: '1px 7px', fontWeight: 600, verticalAlign: 'middle' }}>
+                        NEXT
                       </span>
                     )}
                   </div>
 
-                  {slot.items.length > 0 && (
-                    <div style={{ marginTop: 7, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      {slot.items.map(item => (
-                        <div key={item} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                          <Pill size={11} color={color} style={{ flexShrink: 0 }} />
-                          <span style={{ color: '#0f172a' }}>{item}</span>
-                        </div>
-                      ))}
+                  <div className="tl-card" style={{ borderLeft: `3px solid ${color}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a' }}>{slot.label}</div>
+                      {TYPE_LABELS[slot.type] && (
+                        <span className="badge" style={{ background: color + '18', color, border: `1px solid ${color}40`, fontSize: 10, flexShrink: 0 }}>
+                          {TYPE_LABELS[slot.type]}
+                        </span>
+                      )}
                     </div>
-                  )}
 
-                  {slot.note && (
-                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, lineHeight: 1.5 }}>{slot.note}</div>
-                  )}
+                    {slot.items.length > 0 && (
+                      <div style={{ marginTop: 7, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {slot.items.map(item => (
+                          <div key={item} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                            <Pill size={11} color={color} style={{ flexShrink: 0 }} />
+                            <span style={{ color: '#0f172a' }}>{item}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-                  {slot.warning && (
-                    <div className="alert alert-danger" style={{ marginTop: 8, padding: '8px 10px' }}>
-                      <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
-                      <span>
-                        <strong>30-minute lockout</strong> — no food, water, or any other supplements until {fmt12(addMins(parseMinutes(slot.time), 30))}
-                      </span>
-                    </div>
-                  )}
+                    {slot.note && (
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, lineHeight: 1.5 }}>{slot.note}</div>
+                    )}
+
+                    {slot.warning && (
+                      <div className="alert alert-danger" style={{ marginTop: 8, padding: '8px 10px' }}>
+                        <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                        <span>
+                          <strong>30-minute lockout</strong> — no food, water, or any other supplements until {fmt12(addMins(parseMinutes(slot.time), 30))}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
